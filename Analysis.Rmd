@@ -1,0 +1,1239 @@
+---
+title: "R Notebook"
+output: html_notebook
+params: 
+  data: "/Users/bella/Desktop/Psychologie/Bachelor/Erhebung/RefBackData"
+---
+Author: Annabelle Marteau
+
+Install Packages
+```{r}
+library(stringr)
+library(psych)
+pacman::p_load(pacman, dplyr, GGally, ggplot2, ggthemes, 
+  ggvis, httr, lubridate, plotly, rio, rmarkdown, shiny, 
+  stringr, tidyr)
+library(ggpubr)
+library(plyr)
+library(mediation)
+library(conflicted)
+conflict_prefer("select", "dplyr")
+conflict_prefer("ggpubr", "plyr")
+library(readr)
+library(lme4)
+library(nlme)
+library("shape")
+library("diagram")
+library(R.matlab)
+library("e1071")
+
+```
+
+Data import and tidying
+```{r}
+#importing & tidying data
+folder_path <- "/Users/bella/Desktop/Psychologie/Bachelor/Erhebung/RefBackData"
+file_paths <- list.files(path = folder_path, full.names = TRUE)
+all_data_frames <- list()
+
+for (file_path in file_paths) {
+  d <- readMat(file_path)
+  data <- as.data.frame(d$RespMatrix)
+  ID <- as.numeric(gsub("\\D", "", basename(file_path)))
+  v1 <- as.data.frame(unlist(data$V1))
+  v2 <- as.data.frame(unlist(data$V2))
+  v3 <- unlist(data$V3)
+  v4 <- unlist(data$V4)
+  v5 <- unlist(data$V5)
+  v6 <- unlist(data$V6)
+  v7 <- unlist(data$V7)
+  v8 <- unlist(data$V8)
+  v9 <- unlist(data$V9)
+  file_data_frame <- data.frame(ID, v1, v2, v3, v4, v5, v6, v7, v8, v9)
+  all_data_frames[[length(all_data_frames) + 1]] <- file_data_frame
+}
+
+final_data_frame <- do.call(rbind, all_data_frames)
+
+#tidy data
+final_data_frame$ID <- rep(1:41, each = 400, length.out = nrow(final_data_frame))
+colnames(final_data_frame)[2:10] <- c("trial", "symbol", "trialtype", "colour", "switching", "matching", "accuracy", "response", "reactiontime")
+data <- final_data_frame[, -which(names(final_data_frame) == "colour")]
+data <- data[!(data$switching == "firsttrial"), ]
+#data <- data[!(data$accuracy == 0), ]
+outlier <- mean(data$reactiontime) + 3.5*sd(data$reactiontime)
+data <- data[!(data$reactiontime > outlier | data$reactiontime < 0.15), ]
+data <- plyr::mutate(data, logRT = log(data$reactiontime))
+
+#determine factors
+data$trialtype <- as.factor(data$trialtype)
+data$symbol <- as.factor(data$symbol)
+data$switching <- as.factor(data$switching)
+levels(data$switching)
+jaspdata <- data
+levels(jaspdata$switching) <- c("noswitch", "switch", "noswitch", "switch") #only for jasp data frame. Leave out or code doesn't work.
+levels(jaspdata$switching)
+
+data$response <- as.factor(data$response)
+levels(data$switching)
+data$matching <- factor(data$matching,
+         levels = c(0, 1),
+         labels = c("mismatch", "match"))
+
+data <- data %>% unite(substype, c("trialtype", "matching"), sep = "-", remove = FALSE)
+levels(data$substype)
+data$substype <- as.factor(data$substype)
+
+data <- data %>% unite(combinedtype, c("switching", "matching"), sep = "-", remove = FALSE)
+levels(data$combinedtype)
+data$combinedtype <- as.factor(data$combinedtype)
+data$error_proportion <- 1 - data$accuracy
+data$arcsin <- asin(sqrt(data$accuracy))
+
+summary(data)
+summary(jaspdata)
+sd(jaspdata$reactiontime)
+
+#create csv file of tidied data
+#write.csv(data, "/Users/bella/Desktop/Psychologie/Bachelor/Erhebung/data.csv", row.names = FALSE)
+
+```
+
+```{r}
+#visualise overall error proportion (= 1 - mean accuracy)
+errprop <- 1 - mean(data$accuracy)
+pie(c(errprop, 1 - errprop), labels = c(sprintf("%.2f%% Error", errprop * 100), sprintf("%.2f%% Correct", (1 - errprop) * 100)))
+
+#create a Q-Q plot for logRT (assumption for anova)
+qqnorm(data$logRT)
+qqline(data$logRT)
+
+#hist(data$logRT, freq = FALSE)
+#curve(dnorm(x, mean = mean(data$logRT), sd = sd(data$logRT)), add = TRUE, col = "blue")
+
+
+qqnorm(data$arcsin)
+qqline(data$arcsin)
+
+plot(data$accuracy)
+
+ggplot(data, aes(x = accuracy, y = arcsin)) +
+  geom_point(color = "blue", size = 3, alpha = 0.8) +
+  labs(
+    x = "Original Data (Proportion)",
+    y = "Arcsine Transformed Data",
+    title = "Arcsine Transformation of Proportional Data"
+  ) +
+  theme_minimal()
+
+#calculate accuracy by subject
+proportions <- data %>%
+  group_by(ID) %>%
+  plotly::summarise(correct_proportion = mean(accuracy))
+#apply arcsin transformation to accuracy
+proportions$arcsin_transformed <- asin(sqrt(proportions$correct_proportion))
+#plot arcsin-transformed accuracy against subjects
+ggplot(proportions, aes(x = ID, y = arcsin_transformed)) +
+  geom_line(color = "blue", size = 1, alpha = 0.8) +
+  labs(
+    x = "Category",
+    y = "Arcsin-Transformed Proportion of Correct Responses",
+    title = "Arcsin Transformation of Proportions"
+  ) +
+  theme_minimal()
+```
+
+Descriptive Statistics
+```{r}
+# look at reaction time distribution after outlier removal
+boxplot(data$reactiontime, main="Boxplot of Reaction Time")
+
+boxplot(reactiontime ~ID, data = data, xlab = "Subject ID", ylab = "Reaction Time")
+
+ggplot(data, aes(x = reactiontime)) +
+  geom_histogram(binwidth = 0.1, fill = "blue", color = "black", alpha = 0.7) +
+  labs(title = "Distribution of Reaction Times", x = "Reaction Time") +
+  xlim(c(0, 4))
+
+# Create a histogram of the log-transformed reaction times
+ggplot(data, aes(x = logRT)) +
+  geom_histogram(binwidth = 0.1, fill = "blue", color = "black", alpha = 0.7) +
+  labs(title = "Histogram of Log-Transformed Reaction Times",
+       x = "Log-transformed Reaction Time",
+       y = "Frequency")
+
+# Create a density plot of the log-transformed reaction times
+ggplot(data, aes(x = data$logRT)) +
+  geom_density(fill = "blue", color = "black", alpha = 0.7) +
+  stat_function(fun = dnorm, args = list(mean = mean(data$logRT), sd = sd(data$logRT)), color = "red", size = 1) +
+  labs(title = "Density Plot with Normal Distribution Curve",
+       x = "Log-transformed Reaction Time",
+       y = "Density")
+
+skew <- skewness(data$logRT)
+kurt <- kurtosis(data$logRT)
+cat("Skewness:", skew, "\n")
+cat("Kurtosis:", kurt, "\n")
+
+(sub1 <- data[data$ID == 1,])
+(sub16 <- data[data$ID == 16,])
+(sub40 <- data[data$ID == 40,])
+
+
+ggplot(sub40, aes(x = reactiontime)) +
+  geom_histogram(binwidth = 0.1, fill = "blue", color = "black", alpha = 0.7) +
+  labs(title = "Distribution of Reaction Times", x = "Reaction Time") +
+  xlim(c(0, 4))
+
+# Create a histogram of the log-transformed reaction times
+ggplot(sub40, aes(x = logRT)) +
+  geom_histogram(binwidth = 0.1, fill = "blue", color = "black", alpha = 0.7) +
+  labs(title = "Histogram of Log-Transformed Reaction Times",
+       x = "Log-transformed Reaction Time",
+       y = "Frequency")
+
+# Create a density plot of the log-transformed reaction times
+ggplot(sub40, aes(x = logRT)) +
+  geom_density(fill = "blue", color = "black", alpha = 0.7) +
+  stat_function(fun = dnorm, args = list(mean = mean(sub40$logRT), sd = sd(sub40$logRT)), color = "red", size = 1) +
+  labs(title = "Density Plot with Normal Distribution Curve",
+       x = "Log-transformed Reaction Time",
+       y = "Density")
+```
+
+```{r}
+#RT data for each trial combination
+combined_trials <- data |> dplyr::filter(accuracy != 0) |>
+  select(ID, combinedtype, reactiontime) |>
+  group_by(ID) |> 
+  dplyr::summarise(
+    refswitmat = mean(ifelse(combinedtype == "ref-switch-match", reactiontime, NA), na.rm = TRUE),
+    refnoswitmat = mean(ifelse(combinedtype == "ref-noswitch-match", reactiontime, NA), na.rm = TRUE),
+    refnoswitmismat = mean(ifelse(combinedtype == "ref-noswitch-mismatch", reactiontime, NA), na.rm = TRUE),
+    refswitmismat = mean(ifelse(combinedtype == "ref-switch-mismatch", reactiontime, NA), na.rm = TRUE),
+    cmpswitmat = mean(ifelse(combinedtype == "cmp-switch-match", reactiontime, NA), na.rm = TRUE),
+    cmpnoswitmat = mean(ifelse(combinedtype == "cmp-noswitch-match", reactiontime, NA), na.rm = TRUE),
+    cmpnoswitmismat = mean(ifelse(combinedtype == "cmp-noswitch-mismatch", reactiontime, NA), na.rm = TRUE),
+    cmpswitmismat = mean(ifelse(combinedtype == "cmp-switch-mismatch", reactiontime, NA), na.rm = TRUE),
+    )
+
+summary(combined_trials)
+#write.csv(combined_trials, "/Users/bella/Desktop/Psychologie/Bachelor/Erhebung/combined_trials.csv", row.names = FALSE)
+
+```
+
+Subprocesses
+```{r}
+#mean RT costs of all subprocesses
+(meancosts <- data |> dplyr::filter(accuracy != 0) |>
+  select(ID, trialtype, switching, matching, substype, response, reactiontime) |>
+  group_by(ID) |>
+  dplyr::summarise(
+    reference = mean(ifelse(trialtype == "ref", reactiontime, NA), na.rm = TRUE),
+    comparison = mean(ifelse(trialtype == "cmp", reactiontime, NA), na.rm = TRUE),
+    updating_cost = reference - comparison,
+    
+    match = mean(ifelse(matching == "match", reactiontime, NA), na.rm = TRUE),
+    mismatch = mean(ifelse(matching == "mismatch", reactiontime, NA), na.rm = TRUE),
+    matching_cost = mismatch - match,
+    
+    refswitch = mean(ifelse(switching == "ref-switch", reactiontime, NA), na.rm = TRUE),
+    refnoswitch = mean(ifelse(switching == "ref-noswitch", reactiontime, NA), na.rm = TRUE),
+    gate_opening_cost = refswitch - refnoswitch,
+    
+    cmpswitch = mean(ifelse(switching == "cmp-switch", reactiontime, NA), na.rm = TRUE),
+    cmpnoswitch = mean(ifelse(switching == "cmp-noswitch", reactiontime, NA), na.rm = TRUE),
+    gate_closing_cost = cmpswitch - cmpnoswitch,
+    
+    switch = mean(ifelse(switching %in% c("cmp-switch", "ref-switch"), reactiontime, NA), na.rm = TRUE),
+    noswitch = mean(ifelse(switching %in% c("cmp-noswitch", "ref-noswitch"), reactiontime, NA), na.rm = TRUE),
+    
+    refmis = mean(ifelse(substype == "ref-mismatch", reactiontime, NA), na.rm = TRUE),
+    refmat = mean(ifelse(substype == "ref-match", reactiontime, NA), na.rm = TRUE),
+    
+    cmpmis = mean(ifelse(substype == "cmp-mismatch", reactiontime, NA), na.rm = TRUE),
+    cmpmat = mean(ifelse(substype == "cmp-match", reactiontime, NA), na.rm = TRUE),
+    
+    substitution = ifelse(is.na(refmis-refmat) | is.na(cmpmis-cmpmat), NA, (refmis-refmat) - (cmpmis-cmpmat))
+  ))
+
+summary(meancosts)
+
+(log_meancosts <- data |> dplyr::filter(accuracy != 0) |>
+  select(ID, trialtype, switching, matching, substype, response, logRT) |>
+  group_by(ID) |>
+  dplyr::summarise(
+    reference = mean(ifelse(trialtype == "ref", logRT, NA), na.rm = TRUE),
+    comparison = mean(ifelse(trialtype == "cmp", logRT, NA), na.rm = TRUE),
+    updating_cost = reference - comparison,
+    
+    match = mean(ifelse(matching == "match", logRT, NA), na.rm = TRUE),
+    mismatch = mean(ifelse(matching == "mismatch", logRT, NA), na.rm = TRUE),
+    matching_cost = mismatch - match,
+    
+    refswitch = mean(ifelse(switching == "ref-switch", logRT, NA), na.rm = TRUE),
+    refnoswitch = mean(ifelse(switching == "ref-noswitch", logRT, NA), na.rm = TRUE),
+    gate_opening_cost = refswitch - refnoswitch,
+    
+    switch = mean(ifelse(switching %in% c("cmp-switch", "ref-switch"), logRT, NA), na.rm = TRUE),
+    noswitch = mean(ifelse(switching %in% c("cmp-noswitch", "ref-noswitch"), logRT, NA), na.rm = TRUE),
+    
+    cmpswitch = mean(ifelse(switching == "cmp-switch", logRT, NA), na.rm = TRUE),
+    cmpnoswitch = mean(ifelse(switching == "cmp-noswitch", logRT, NA), na.rm = TRUE),
+    gate_closing_cost = cmpswitch - cmpnoswitch,
+    
+    refmis = mean(ifelse(substype == "ref-mismatch", logRT, NA), na.rm = TRUE),
+    refmat = mean(ifelse(substype == "ref-match", logRT, NA), na.rm = TRUE),
+    
+    cmpmis = mean(ifelse(substype == "cmp-mismatch", logRT, NA), na.rm = TRUE),
+    cmpmat = mean(ifelse(substype == "cmp-match", logRT, NA), na.rm = TRUE),
+    
+    substitution = ifelse(is.na(refmis-refmat) | is.na(cmpmis-cmpmat), NA, (refmis-refmat) - (cmpmis-cmpmat))
+  ))
+
+summary(log_meancosts)
+
+write.csv(log_meancosts, "/Users/bella/Desktop/Psychologie/Bachelor/Erhebung/log_meancosts.csv", row.names = FALSE)
+
+```
+
+```{r}
+# Extract relevant columns for the original data frame
+condition_RT <- meancosts %>%
+  select(reference, comparison, match, mismatch, switch, noswitch)
+
+
+# Create a function to calculate skewness and kurtosis
+skew_kurt1 <- function(x) {
+  c(Mean = mean(x, na.rm = TRUE)*1000,
+    SD = sd(x, na.rm = TRUE)*1000,
+    Min = min(x, na.rm = TRUE)*1000,
+    Max = max(x, na.rm = TRUE)*1000,
+    Skewness = skewness(x, na.rm = TRUE),
+    Kurtosis = kurtosis(x, na.rm = TRUE))
+}
+
+# Apply the function to each column and bind the results
+descr_RT <- condition_RT %>%
+  summarise_all(skew_kurt1)
+
+descr_RT <- t(descr_RT)
+
+# Add row & col names for better labeling
+row.names(descr_RT) <- c("Reference", "Comparison", "Match", "Mismatch", "Switch", "No Switch")
+colnames(descr_RT) <- c("Mean", "SD", "Min", "Max", "Skewness", "Kurtosis")
+
+# Combine the original data frame with the new column
+descr_RT <- as.data.frame(descr_RT)
+
+# Print the final data frame
+print(descr_RT)
+
+```
+
+Split-half Reliability
+```{r}
+#split data by odd and even half to create two samples independent of tiring effect
+data1 <- data[seq(1, nrow(data), by = 2), ]
+
+(meancosts1 <- data1 |> dplyr::filter(accuracy != 0) |>
+  select(ID, trialtype, switching, matching, substype, response, reactiontime) |>
+  group_by(ID) |>
+  dplyr::summarise(
+    reference = mean(ifelse(trialtype == "ref", reactiontime, NA), na.rm = TRUE),
+    comparison = mean(ifelse(trialtype == "cmp", reactiontime, NA), na.rm = TRUE),
+    updating_cost = reference - comparison,
+    
+    match = mean(ifelse(matching == "match", reactiontime, NA), na.rm = TRUE),
+    mismatch = mean(ifelse(matching == "mismatch", reactiontime, NA), na.rm = TRUE),
+    matching_cost = mismatch - match,
+    
+    refswitch = mean(ifelse(switching == "ref-switch", reactiontime, NA), na.rm = TRUE),
+    refnoswitch = mean(ifelse(switching == "ref-noswitch", reactiontime, NA), na.rm = TRUE),
+    gate_opening_cost = refswitch - refnoswitch,
+    
+    cmpswitch = mean(ifelse(switching == "cmp-switch", reactiontime, NA), na.rm = TRUE),
+    cmpnoswitch = mean(ifelse(switching == "cmp-noswitch", reactiontime, NA), na.rm = TRUE),
+    gate_closing_cost = cmpswitch - cmpnoswitch,
+    
+    refmis = mean(ifelse(substype == "ref-mismatch", reactiontime, NA), na.rm = TRUE),
+    refmat = mean(ifelse(substype == "ref-match", reactiontime, NA), na.rm = TRUE),
+    
+    cmpmis = mean(ifelse(substype == "cmp-mismatch", reactiontime, NA), na.rm = TRUE),
+    cmpmat = mean(ifelse(substype == "cmp-match", reactiontime, NA), na.rm = TRUE),
+    
+    substitution = ifelse(is.na(refmis-refmat) | is.na(cmpmis-cmpmat), NA, (refmis-refmat) - (cmpmis-cmpmat))
+  ))
+
+summary(meancosts1)
+
+data2 <- data[seq(2, nrow(data), by = 2), ]
+
+(meancosts2 <- data2 |> dplyr::filter(accuracy != 0) |>
+  select(ID, trialtype, switching, matching, substype, response, reactiontime) |>
+  group_by(ID) |>
+  dplyr::summarise(
+    reference = mean(ifelse(trialtype == "ref", reactiontime, NA), na.rm = TRUE),
+    comparison = mean(ifelse(trialtype == "cmp", reactiontime, NA), na.rm = TRUE),
+    updating_cost = reference - comparison,
+    
+    match = mean(ifelse(matching == "match", reactiontime, NA), na.rm = TRUE),
+    mismatch = mean(ifelse(matching == "mismatch", reactiontime, NA), na.rm = TRUE),
+    matching_cost = mismatch - match,
+    
+    refswitch = mean(ifelse(switching == "ref-switch", reactiontime, NA), na.rm = TRUE),
+    refnoswitch = mean(ifelse(switching == "ref-noswitch", reactiontime, NA), na.rm = TRUE),
+    gate_opening_cost = refswitch - refnoswitch,
+    
+    cmpswitch = mean(ifelse(switching == "cmp-switch", reactiontime, NA), na.rm = TRUE),
+    cmpnoswitch = mean(ifelse(switching == "cmp-noswitch", reactiontime, NA), na.rm = TRUE),
+    gate_closing_cost = cmpswitch - cmpnoswitch,
+    
+    refmis = mean(ifelse(substype == "ref-mismatch", reactiontime, NA), na.rm = TRUE),
+    refmat = mean(ifelse(substype == "ref-match", reactiontime, NA), na.rm = TRUE),
+    
+    cmpmis = mean(ifelse(substype == "cmp-mismatch", reactiontime, NA), na.rm = TRUE),
+    cmpmat = mean(ifelse(substype == "cmp-match", reactiontime, NA), na.rm = TRUE),
+    
+    substitution = ifelse(is.na(refmis-refmat) | is.na(cmpmis-cmpmat), NA, (refmis-refmat) - (cmpmis-cmpmat))
+  ))
+
+summary(meancosts2)
+
+#correlate processes for each half then visualise
+updating_corr <- cor(meancosts1$updating_cost, meancosts2$updating_cost, method = "spearman")
+
+ggplot(meancosts1, aes(x = updating_cost, y = meancosts2$updating_cost)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(x = "Updating 1", y = "Updating 2", title = "Scatter Plot of Split-Half Updating")
+
+matching_corr <- cor(meancosts1$matching_cost, meancosts2$matching_cost, method = "spearman")
+
+ggplot(meancosts1, aes(x = matching_cost, y = meancosts2$matching_cost)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(x = "Matching 1", y = "Matching 2", title = "Scatter Plot of Split-Half Matching")
+
+gate_opening_corr <- cor(meancosts1$gate_opening_cost, meancosts2$gate_opening_cost, method = "spearman")
+
+ggplot(meancosts1, aes(x = gate_opening_cost, y = meancosts2$gate_opening_cost)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(x = "Gate Opening 1", y = "Gate Opening 2", title = "Scatter Plot of Split-Half Gate Opening")
+
+gate_closing_corr <- cor(meancosts1$gate_closing_cost, meancosts2$gate_closing_cost, method = "spearman")
+
+ggplot(meancosts1, aes(x = gate_closing_cost, y = meancosts2$gate_closing_cost)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(x = "Gate Closing 1", y = "Gate Closing 2", title = "Scatter Plot of Split-Half Gate Closing")
+
+substitution_corr <- cor(meancosts1$substitution, meancosts2$substitution, method = "spearman", use = "complete.obs")
+
+ggplot(meancosts1, aes(x = substitution, y = meancosts2$substitution)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(x = "Substitution 1", y = "Substitution 2", title = "Scatter Plot of Split-Half Substitution")
+
+Reliability <- c(
+  updating_corr,
+  matching_corr,
+  substitution_corr,
+  gate_opening_corr,
+  gate_closing_corr
+)
+
+ggplot(meancosts1, aes(x = substitution, y = meancosts2$substitution)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(x = "Substitution 1", y = "Substitution 2", title = "Scatter Plot of Split-Half Substitution")
+```
+
+
+```{r}
+#same thing with logRT
+(log_meancosts1 <- data1 |> dplyr::filter(accuracy != 0) |>
+  select(ID, trialtype, switching, matching, substype, response, logRT) |>
+  group_by(ID) |>
+  dplyr::summarise(
+    reference = mean(ifelse(trialtype == "ref", logRT, NA), na.rm = TRUE),
+    comparison = mean(ifelse(trialtype == "cmp", logRT, NA), na.rm = TRUE),
+    updating_cost = reference - comparison,
+    
+    match = mean(ifelse(matching == "match", logRT, NA), na.rm = TRUE),
+    mismatch = mean(ifelse(matching == "mismatch", logRT, NA), na.rm = TRUE),
+    matching_cost = mismatch - match,
+    
+    refswitch = mean(ifelse(switching == "ref-switch", logRT, NA), na.rm = TRUE),
+    refnoswitch = mean(ifelse(switching == "ref-noswitch", logRT, NA), na.rm = TRUE),
+    gate_opening_cost = refswitch - refnoswitch,
+    
+    cmpswitch = mean(ifelse(switching == "cmp-switch", logRT, NA), na.rm = TRUE),
+    cmpnoswitch = mean(ifelse(switching == "cmp-noswitch", logRT, NA), na.rm = TRUE),
+    gate_closing_cost = cmpswitch - cmpnoswitch,
+    
+    refmis = mean(ifelse(substype == "ref-mismatch", logRT, NA), na.rm = TRUE),
+    refmat = mean(ifelse(substype == "ref-match", logRT, NA), na.rm = TRUE),
+    
+    cmpmis = mean(ifelse(substype == "cmp-mismatch", logRT, NA), na.rm = TRUE),
+    cmpmat = mean(ifelse(substype == "cmp-match", logRT, NA), na.rm = TRUE),
+    
+    substitution = ifelse(is.na(refmis-refmat) | is.na(cmpmis-cmpmat), NA, (refmis-refmat) - (cmpmis-cmpmat))
+  ))
+
+summary(log_meancosts1)
+
+(log_meancosts2 <- data2 |> dplyr::filter(accuracy != 0) |>
+  select(ID, trialtype, switching, matching, substype, response, logRT) |>
+  group_by(ID) |>
+  dplyr::summarise(
+    reference = mean(ifelse(trialtype == "ref", logRT, NA), na.rm = TRUE),
+    comparison = mean(ifelse(trialtype == "cmp", logRT, NA), na.rm = TRUE),
+    updating_cost = reference - comparison,
+    
+    match = mean(ifelse(matching == "match", logRT, NA), na.rm = TRUE),
+    mismatch = mean(ifelse(matching == "mismatch", logRT, NA), na.rm = TRUE),
+    matching_cost = mismatch - match,
+    
+    refswitch = mean(ifelse(switching == "ref-switch", logRT, NA), na.rm = TRUE),
+    refnoswitch = mean(ifelse(switching == "ref-noswitch", logRT, NA), na.rm = TRUE),
+    gate_opening_cost = refswitch - refnoswitch,
+    
+    cmpswitch = mean(ifelse(switching == "cmp-switch", logRT, NA), na.rm = TRUE),
+    cmpnoswitch = mean(ifelse(switching == "cmp-noswitch", logRT, NA), na.rm = TRUE),
+    gate_closing_cost = cmpswitch - cmpnoswitch,
+    
+    refmis = mean(ifelse(substype == "ref-mismatch", logRT, NA), na.rm = TRUE),
+    refmat = mean(ifelse(substype == "ref-match", logRT, NA), na.rm = TRUE),
+    
+    cmpmis = mean(ifelse(substype == "cmp-mismatch", logRT, NA), na.rm = TRUE),
+    cmpmat = mean(ifelse(substype == "cmp-match", logRT, NA), na.rm = TRUE),
+    
+    substitution = ifelse(is.na(refmis-refmat) | is.na(cmpmis-cmpmat), NA, (refmis-refmat) - (cmpmis-cmpmat))
+  ))
+
+summary(log_meancosts2)
+
+#correlate processes for each half then visualise
+log_updating_corr <- cor(log_meancosts1$updating_cost, log_meancosts2$updating_cost, method = "spearman")
+??cor()
+
+ggplot(log_meancosts1, aes(x = updating_cost, y = log_meancosts2$updating_cost)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(x = "Updating 1", y = "Updating 2", title = "Scatter Plot of Split-Half Updating")
+
+log_matching_corr <- cor(log_meancosts1$matching_cost, log_meancosts2$matching_cost, method = "spearman")
+
+ggplot(log_meancosts1, aes(x = matching_cost, y = log_meancosts2$matching_cost)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(x = "Matching 1", y = "Matching 2", title = "Scatter Plot of Split-Half Matching")
+
+log_gate_opening_corr <- cor(log_meancosts1$gate_opening_cost, log_meancosts2$gate_opening_cost, method = "spearman")
+
+ggplot(log_meancosts1, aes(x = gate_opening_cost, y = log_meancosts2$gate_opening_cost)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(x = "Gate Opening 1", y = "Gate Opening 2", title = "Scatter Plot of Split-Half Gate Opening")
+
+log_gate_closing_corr <- cor(log_meancosts1$gate_closing_cost, log_meancosts2$gate_closing_cost, method = "spearman")
+
+ggplot(log_meancosts1, aes(x = gate_closing_cost, y = log_meancosts2$gate_closing_cost)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(x = "Gate Closing 1", y = "Gate Closing 2", title = "Scatter Plot of Split-Half Gate Closing")
+
+log_substitution_corr <- cor(log_meancosts1$substitution, log_meancosts2$substitution, method = "spearman", use = "complete.obs")
+
+ggplot(log_meancosts1, aes(x = substitution, y = log_meancosts2$substitution)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(x = "Substitution 1", y = "Substitution 2", title = "Scatter Plot of Split-Half Substitution")
+
+logReliability <- c(
+  log_updating_corr,
+  log_matching_corr,
+  log_substitution_corr,
+  log_gate_opening_corr,
+  log_gate_closing_corr
+)
+```
+
+```{r}
+# Mean, SD, minimum and maximum of untransformed data in ms. Skewness, kurtosis and reliability calculated with log-transformed RT. Reliability as split-half between even and odd trials.
+process_data <- meancosts %>%
+  select(updating_cost, matching_cost, substitution, gate_opening_cost, gate_closing_cost)
+
+process_log_data <- log_meancosts %>%
+  select(updating_cost, matching_cost, substitution, gate_opening_cost, gate_closing_cost)
+
+
+# Create function to calculate descriptive stats and skewness, kurtosis
+describe_var <- function(x) {
+  c(Mean = mean(x, na.rm = TRUE)*1000,
+    SD = sd(x, na.rm = TRUE)*1000,
+    Min = min(x, na.rm = TRUE)*1000,
+    Max = max(x, na.rm = TRUE)*1000)
+}
+skew_kurt <- function(x) {
+  c(Skewness = skewness(x, na.rm = TRUE),
+    Kurtosis = kurtosis(x, na.rm = TRUE))
+}
+# Apply function to untransformed and log-transformed RT
+descr_mean <- process_data %>%
+  summarise_all(describe_var)
+skew_mean <- process_log_data %>%
+  summarise_all(skew_kurt)
+descr_mean <- t(descr_mean)
+skew_mean <- t(skew_mean)
+
+# Add row & col names for better labeling
+row.names(descr_mean) <- c("Updating Cost", "Matching Cost", "Substitution", "Gate Opening", "Gate Closing")
+colnames(descr_mean) <- c("Mean", "SD", "Min", "Max")
+row.names(skew_mean) <- c("Updating Cost", "Matching Cost", "Substitution", "Gate Opening", "Gate Closing")
+colnames(skew_mean) <- c("Skewness", "Kurtosis")
+
+# Combine the two dataframes
+descr_mean <- cbind(as.data.frame(descr_mean), as.data.frame(skew_mean), logReliability)
+colnames(descr_mean) <- c("Mean", "SD", "Min", "Max", "Skewness", "Kurtosis", "Reliability")
+print(descr_mean)
+
+
+# Apply the function to each column and bind the results
+#descr_log_mean <- process_log_data %>%
+ # summarise_all(skew_kurt)
+# Transpose the result for a cleaner presentation
+#descr_log_mean <- t(descr_log_mean)
+
+# Add row & col names for better labeling
+#row.names(descr_log_mean) <- c("Updating Cost", "Matching Cost", "Substitution", "Gate Opening", "Gate Closing")
+#colnames(descr_log_mean) <- c("Mean", "SD", "Min", "Max", "Skewness", "Kurtosis")
+
+# Combine the original data frame with the new column
+#descr_log_mean <- cbind(as.data.frame(descr_log_mean), logReliability)
+#colnames(descr_log_mean) <- c("Mean", "SD", "Min", "Max", "Skewness", "Kurtosis", "Reliability")
+
+# Print the final data frame
+#print(descr_log_mean)
+
+#visualise
+# Select specific processes
+mean_selected_processes <- c("updating_cost", "matching_cost", "substitution", "gate_opening_cost", "gate_closing_cost")
+
+# Reshape data for ggplot and filter for selected processes
+meancosts_selected <- meancosts %>%
+  select(ID, matches(mean_selected_processes)) %>%
+  gather(key = "Process", value = "Error", -ID)
+
+# Boxplot
+ggplot(meancosts_selected, aes(x = Process, y = Error)) +
+  geom_boxplot() +
+  labs(title = "Mean costs for Selected Processes",
+       x = "Process",
+       y = "Cost") +
+  theme_minimal()
+
+# Reshape data for ggplot and filter for selected processes
+meancosts_selected <- log_meancosts %>%
+  select(ID, matches(mean_selected_processes)) %>%
+  gather(key = "Process", value = "Error", -ID)
+
+# Boxplot
+ggplot(meancosts_selected, aes(x = Process, y = Error)) +
+  geom_boxplot() +
+  labs(title = "Mean costs for Selected Processes",
+       x = "Process",
+       y = "RT Cost (log)") +
+  theme_minimal()
+```
+
+```{r}
+# mean PEs of all subprocesses
+(epcosts <- data %>%
+  plyr::mutate((substype = paste(trialtype, matching, sep = "-"))) %>%
+  group_by(ID) %>%
+  dplyr::summarise(
+    reference_error = 1 - mean(accuracy[trialtype == "ref"]),
+    comparison_error = 1 - mean(accuracy[trialtype == "cmp"]),
+    updating_pe = reference_error - comparison_error,
+    
+    match_error = 1 - mean(accuracy[matching == "match"]),
+    mismatch_error = 1 - mean(accuracy[matching == "mismatch"]),
+    matching_pe = mismatch_error - match_error,
+    
+    refswitch_error = 1 - mean(accuracy[switching == "ref-switch"]),
+    refnoswitch_error = 1 - mean(accuracy[switching == "ref-noswitch"]),
+    gate_opening_pe = refswitch_error - refnoswitch_error,
+    
+    cmpswitch_error = 1 - mean(accuracy[switching == "cmp-switch"]),
+    cmpnoswitch_error = 1 - mean(accuracy[switching == "cmp-noswitch"]),
+    gate_closing_pe = cmpswitch_error - cmpnoswitch_error,
+    
+    refmis_error = 1 - mean(accuracy[substype == "ref-mismatch"]),
+    refmat_error = 1 - mean(accuracy[substype == "ref-match"]),
+    
+    cmpmis_error = 1 - mean(accuracy[substype == "cmp-mismatch"]),
+    cmpmat_error = 1 - mean(accuracy[substype == "cmp-match"]),
+    
+    substitution_pe = ifelse(is.na(refmis_error-refmat_error) | is.na(cmpmis_error-cmpmat_error), NA, (refmis_error-refmat_error) - (cmpmis_error-cmpmat_error))
+  ))
+
+# Ensure error proportions are within [0, 1]
+epcosts <- epcosts %>%
+  mutate_all(~ pmax(0, pmin(1, .)))
+
+summary(epcosts)
+
+#mean EP after arc sin tranformation
+(epcosts_arc <- data %>%
+  plyr::mutate((substype = paste(trialtype, matching, sep = "-"))) %>%
+  group_by(ID) %>%
+  dplyr::summarise(
+    reference_error = 1 - mean(arcsin[trialtype == "ref"]),
+    comparison_error = 1 - mean(arcsin[trialtype == "cmp"]),
+    updating_pe = reference_error - comparison_error,
+    
+    match_error = 1 - mean(arcsin[matching == "match"]),
+    mismatch_error = 1 - mean(arcsin[matching == "mismatch"]),
+    matching_pe = mismatch_error - match_error,
+    
+    refswitch_error = 1 - mean(arcsin[switching == "ref-switch"]),
+    refnoswitch_error = 1 - mean(arcsin[switching == "ref-noswitch"]),
+    gate_opening_pe = refswitch_error - refnoswitch_error,
+    
+    cmpswitch_error = 1 - mean(arcsin[switching == "cmp-switch"]),
+    cmpnoswitch_error = 1 - mean(arcsin[switching == "cmp-noswitch"]),
+    gate_closing_pe = cmpswitch_error - cmpnoswitch_error,
+    
+    refmis_error = 1 - mean(arcsin[substype == "ref-mismatch"]),
+    refmat_error = 1 - mean(arcsin[substype == "ref-match"]),
+    
+    cmpmis_error = 1 - mean(arcsin[substype == "cmp-mismatch"]),
+    cmpmat_error = 1 - mean(arcsin[substype == "cmp-match"]),
+    
+    substitution_pe = ifelse(is.na(refmis_error-refmat_error) | is.na(cmpmis_error-cmpmat_error), NA, (refmis_error-refmat_error) - (cmpmis_error-cmpmat_error))
+  ))
+
+summary(epcosts_arc)
+```
+Split half reliability of Error proportions
+```{r}
+arcepcosts1 <- data1 %>%
+  plyr::mutate((substype = paste(trialtype, matching, sep = "-"))) %>%
+  group_by(ID) %>%
+  dplyr::summarise(
+    reference_error = 1 - mean(arcsin[trialtype == "ref"]),
+    comparison_error = 1 - mean(arcsin[trialtype == "cmp"]),
+    updating_pe = reference_error - comparison_error,
+    
+    match_error = 1 - mean(arcsin[matching == "match"]),
+    mismatch_error = 1 - mean(arcsin[matching == "mismatch"]),
+    matching_pe = mismatch_error - match_error,
+    
+    refswitch_error = 1 - mean(arcsin[switching == "ref-switch"]),
+    refnoswitch_error = 1 - mean(arcsin[switching == "ref-noswitch"]),
+    gate_opening_pe = refswitch_error - refnoswitch_error,
+    
+    cmpswitch_error = 1 - mean(arcsin[switching == "cmp-switch"]),
+    cmpnoswitch_error = 1 - mean(arcsin[switching == "cmp-noswitch"]),
+    gate_closing_pe = cmpswitch_error - cmpnoswitch_error,
+    
+    refmis_error = 1 - mean(arcsin[substype == "ref-mismatch"]),
+    refmat_error = 1 - mean(arcsin[substype == "ref-match"]),
+    
+    cmpmis_error = 1 - mean(arcsin[substype == "cmp-mismatch"]),
+    cmpmat_error = 1 - mean(arcsin[substype == "cmp-match"]),
+    
+    substitution_pe = ifelse(is.na(refmis_error-refmat_error) | is.na(cmpmis_error-cmpmat_error), NA, (refmis_error-refmat_error) - (cmpmis_error-cmpmat_error))
+  )
+
+#arcepcosts1 <- arcepcosts1 %>%
+ # mutate_all(~ pmax(0, pmin(1, .)))
+
+arcepcosts2 <- data2 %>%
+  plyr::mutate((substype = paste(trialtype, matching, sep = "-"))) %>%
+  group_by(ID) %>%
+  dplyr::summarise(
+    reference_error = 1 - mean(arcsin[trialtype == "ref"]),
+    comparison_error = 1 - mean(arcsin[trialtype == "cmp"]),
+    updating_pe = reference_error - comparison_error,
+    
+    match_error = 1 - mean(arcsin[matching == "match"]),
+    mismatch_error = 1 - mean(arcsin[matching == "mismatch"]),
+    matching_pe = mismatch_error - match_error,
+    
+    refswitch_error = 1 - mean(arcsin[switching == "ref-switch"]),
+    refnoswitch_error = 1 - mean(arcsin[switching == "ref-noswitch"]),
+    gate_opening_pe = refswitch_error - refnoswitch_error,
+    
+    cmpswitch_error = 1 - mean(arcsin[switching == "cmp-switch"]),
+    cmpnoswitch_error = 1 - mean(arcsin[switching == "cmp-noswitch"]),
+    gate_closing_pe = cmpswitch_error - cmpnoswitch_error,
+    
+    refmis_error = 1 - mean(arcsin[substype == "ref-mismatch"]),
+    refmat_error = 1 - mean(arcsin[substype == "ref-match"]),
+    
+    cmpmis_error = 1 - mean(arcsin[substype == "cmp-mismatch"]),
+    cmpmat_error = 1 - mean(arcsin[substype == "cmp-match"]),
+    
+    substitution_pe = ifelse(is.na(refmis_error-refmat_error) | is.na(cmpmis_error-cmpmat_error), NA, (refmis_error-refmat_error) - (cmpmis_error-cmpmat_error))
+  )
+
+#arcepcosts2 <- arcepcosts2 %>%
+ # mutate_all(~ pmax(0, pmin(1, .)))
+
+#correlate processes for each half then visualise
+updating_corr_ep <- cor(arcepcosts1$updating_pe, arcepcosts2$updating_pe, method = "spearman")
+matching_corr_ep <- cor(arcepcosts1$matching_pe, arcepcosts2$matching_pe, method = "spearman")
+gate_opening_corr_ep <- cor(arcepcosts1$gate_opening_pe, arcepcosts2$gate_opening_pe, method = "spearman")
+gate_closing_corr_ep <- cor(arcepcosts1$gate_closing_pe, arcepcosts2$gate_closing_pe, method = "spearman")
+substitution_corr_ep <- cor(arcepcosts1$substitution_pe, arcepcosts2$substitution_pe, method = "spearman", use = "complete.obs")
+
+ggplot(arcepcosts1, aes(x = substitution_pe, y = arcepcosts2$substitution_pe)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(x = "Updating 1", y = "Updating 2", title = "Scatter Plot of Split-Half Updating PE")
+
+# Calculate reliability with arcsin instead of accuracy!!
+(Reliability_ep <- c(
+  updating_corr_ep,
+  matching_corr_ep,
+  substitution_corr_ep,
+  gate_opening_corr_ep,
+  gate_closing_corr_ep
+))
+
+```
+
+```{r}
+# Extract relevant columns
+epdata <- epcosts |>
+  select(updating_pe, matching_pe, substitution_pe, gate_opening_pe, gate_closing_pe)
+
+arcepdata <- epcosts_arc |>
+  select(updating_pe, matching_pe, substitution_pe, gate_opening_pe, gate_closing_pe)
+
+ep_describe_var <- function(x) {
+  c(Mean = mean(x, na.rm = TRUE),
+    SD = sd(x, na.rm = TRUE),
+    Min = min(x, na.rm = TRUE),
+    Max = max(x, na.rm = TRUE))
+}
+
+# Apply above created functions to untransformed and arcsin-transformed EP
+ep_descr_mean <- epdata %>%
+  summarise_all(ep_describe_var)
+ep_skew_mean <- arcepdata %>%
+  summarise_all(skew_kurt)
+ep_descr_mean <- t(ep_descr_mean)
+ep_skew_mean <- t(ep_skew_mean)
+
+# Add row & col names
+row.names(ep_descr_mean) <- c("Updating Cost", "Matching Cost", "Substitution", "Gate Opening", "Gate Closing")
+colnames(ep_descr_mean) <- c("Mean", "SD", "Min", "Max")
+row.names(ep_skew_mean) <- c("Updating Cost", "Matching Cost", "Substitution", "Gate Opening", "Gate Closing")
+colnames(ep_skew_mean) <- c("Skewness", "Kurtosis")
+
+# Combine the two dataframes
+ep_descr_mean <- cbind(as.data.frame(ep_descr_mean), as.data.frame(ep_skew_mean), Reliability_ep)
+colnames(ep_descr_mean) <- c("Mean", "SD", "Min", "Max", "Skewness", "Kurtosis", "Reliability")
+print(ep_descr_mean)
+
+# visualise
+# Select specific processes
+selected_processes <- c("updating", "matching", "substitution", "gate_opening", "gate_closing")
+
+# Reshape data for ggplot and filter for selected processes
+error_costs_selected <- epcosts %>%
+  select(ID, matches(selected_processes)) %>%
+  gather(key = "Process", value = "Error", -ID)
+
+# Boxplot
+ggplot(error_costs_selected, aes(x = Process, y = Error)) +
+  geom_boxplot() +
+  labs(title = "Error Proportions for Selected Processes",
+       x = "Process",
+       y = "Error Proportion") +
+  coord_cartesian(ylim = c(0, 0.2)) +
+  theme_minimal()
+
+
+```
+
+ANOVA
+```{r}
+# Fit the 3-way ANOVA model for RT
+rtmodel <- aov(logRT ~ trialtype * matching * switching, data = jaspdata)
+
+summary(rtmodel)
+(posthoc <- TukeyHSD(rtmodel))
+
+diffmodel <- aov(logRT ~ combinedtype, data = data)
+summary(diffmodel)
+
+(diffposthoc <- TukeyHSD(diffmodel))
+res <- aov(logRT ~trialtype + matching + switching, data)
+anova(res)
+
+
+#regression for logRT
+reg <- lm(logRT ~ trialtype + switching + matching + trialtype * switching, jaspdata)
+summary(reg)
+
+regep <- lm(accuracy ~ trialtype + switching + matching + trialtype * switching, jaspdata)
+summary(regep)
+
+# Fit the 3-way ANOVA model for PE
+epmodel <- aov(accuracy ~ trialtype * matching * switching, data = data)
+summary(epmodel)
+
+(posthoc <- TukeyHSD(epmodel))
+
+epreg <- lm(accuracy ~trialtype + matching + switching, data)
+anova(epreg)
+
+```
+
+Visualisation
+```{r}
+#Visualise results
+# Filter data for switch == "switch"
+switchdata <- data |> dplyr::filter(!grepl("noswitch", switching))
+
+# Rename factor levels for 'trialtype'
+levels(switchdata$trialtype)
+
+# Rename factor levels for 'trialtype'
+switchdata$trialtype <- factor(switchdata$trialtype, levels = c("cmp", "ref"), labels = c("comparison", "reference"))
+
+# Create an interaction plot with labels
+interaction.plot(x.factor = switchdata$trialtype, trace.factor = switchdata$matching, 
+                 response = switchdata$reactiontime, type = "b",
+                 pch = c(16, 17),
+                 xlab = "Switch", ylab = "Reaction Time (s)", trace.label = "Matching", 
+                 ylim = c(0.4, 1.2))
+
+# Filter data for switch == "switch"
+noswitchdata <- data |> dplyr::filter(grepl("noswitch", switching))
+noswitchdata$trialtype <- factor(noswitchdata$trialtype, levels = c("cmp", "ref"), labels = c("comparison", "reference"))
+
+# Create an interaction plot with labels
+interaction.plot(x.factor = noswitchdata$trialtype, trace.factor = noswitchdata$matching, 
+                 response = noswitchdata$reactiontime, type = "b",
+                 pch = c(16, 17),
+                 xlab = "No Switch", ylab = "Reaction Time (s)", trace.label = "Matching",
+                 ylim = c(0.4, 1.2))
+
+# Calculate error proportion
+switchdata$error_proportion <- 1 - switchdata$accuracy
+summary(switchdata)
+noswitchdata$error_proportion <- 1 - noswitchdata$accuracy
+summary(noswitchdata)
+
+# Fit the 3-way ANOVA model
+epmodel <- aov(error_proportion ~ trialtype * switching * matching, data = data)
+
+# Create interaction plot
+interaction.plot(x.factor = switchdata$trialtype, trace.factor = switchdata$matching, 
+                 response = switchdata$error_proportion, type = "b",
+                 pch = c(16, 17), 
+                 xlab = "Switch", ylab = "Error Proportion", trace.label = "Matching",
+                 ylim = c(0, 0.1))
+interaction.plot(x.factor = noswitchdata$trialtype, trace.factor = noswitchdata$matching, 
+                 response = noswitchdata$error_proportion, type = "b", 
+                 pch = c(16, 17), 
+                 xlab = "No Switch", ylab = "Error Proportion", trace.label = "Matching",
+                 ylim = c(0, 0.1))
+interaction.plot(x.factor = data$switching, trace.factor = data$matching, 
+                 response = data$error_proportion, type = "b", 
+                 pch = c(16, 17),
+                 xlab = "Trial- and Switchtypes", ylab = "Error Proportion", trace.label = "Matching",
+                 ylim = c(0, 0.1)) 
+interaction.plot(x.factor = data$switching, trace.factor = data$matching, 
+                 response = data$reactiontime, type = "b", 
+                 pch = c(16, 17),
+                 xlab = "Trial- and Switchtypes", ylab = "Reaction Time (s)", trace.label = "Matching",
+                 ylim = c(0.4, 1.3)) 
+
+interaction.plot(x.factor = jaspdata$trialtype, trace.factor = jaspdata$switching, 
+                 response = jaspdata$reactiontime, type = "b",
+                 pch = c(16, 17), 
+                 xlab = "trialtype", ylab = "Reaction Time (s)", trace.label = "switching",
+                 ylim = c(0.4, 1.2))
+
+# Calculate correlation matrix for heatmap
+cormatrix <- cor(meancosts[, c("updating_cost", "matching_cost", "gate_opening_cost", "gate_closing_cost", "substitution")], use = "complete.obs", method = "pearson")
+colnames(cormatrix) <- c("Updating", "Matching", "Gate Opening", "Gate Closing", "Substitution")
+rownames(cormatrix) <- c("Updating", "Matching", "Gate Opening", "Gate Closing", "Substitution")
+print(cormatrix)
+cor_df <- reshape2::melt(cormatrix)
+
+# Plot correlation heatmap with labels
+ggplot(cor_df, aes(x = Var1, y = Var2, fill = value, label = round(value, 2))) +
+  geom_tile() +
+  geom_text(color = "black", size = 3) +  # Add text labels
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(x = "", y = "", title = "Correlation Heatmap of Processes") +
+  theme_minimal()
+
+epcormatrix <- cor(epcosts[, c("updating_pe", "matching_pe", "gate_opening_pe", "gate_closing_pe", "substitution_pe")], use = "complete.obs", method = "pearson")
+colnames(epcormatrix) <- c("Updating", "Matching", "Gate Opening", "Gate Closing", "Substitution")
+rownames(epcormatrix) <- c("Updating", "Matching", "Gate Opening", "Gate Closing", "Substitution")
+print(epcormatrix)
+epcor_df <- reshape2::melt(epcormatrix)
+
+# Plot correlation heatmap with labels
+ggplot(epcor_df, aes(x = Var1, y = Var2, fill = value, label = round(value, 2))) +
+  geom_tile() +
+  geom_text(color = "black", size = 3) +  # Add text labels
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(x = "", y = "", title = "Correlation Heatmap of Processes (PE)") +
+  theme_minimal()
+
+```
+
+```{r}
+# Define switch dataset and no switch dataset for RT visualisation
+
+#switchdata$reactiontime <- switchdata$reactiontime*1000
+sum_switch_df <- switchdata %>%
+  group_by(trialtype, matching) %>%
+  plotly::summarise(
+    Mean = mean(reactiontime),
+    SE = sd(reactiontime) / sqrt(n())
+  )
+
+#noswitchdata$reactiontime <- noswitchdata$reactiontime*1000
+sum_noswitch_df <- noswitchdata %>%
+  group_by(trialtype, matching) %>%
+  plotly::summarise(
+    Mean = mean(reactiontime),
+    SE = sd(reactiontime) / sqrt(n())
+  )
+
+sum_jaspdf1 <- jaspdata %>%
+  group_by(trialtype, matching) %>%
+  plotly::summarise(
+    Mean = mean(reactiontime),
+    SE = sd(reactiontime) / sqrt(n())
+  )
+
+#jaspdata$reactiontime <- jaspdata$reactiontime/1000
+sum_jaspdf2 <- jaspdata %>%
+  group_by(trialtype, switching) %>%
+  plotly::summarise(
+    Mean = mean(reactiontime),
+    SE = sd(reactiontime) / sqrt(n())
+  )
+
+# code for bar chart
+#ggplot(sum_switch_df, aes(x = trialtype, y = Mean, fill = matching)) +
+ # geom_bar(stat = "identity", position = "dodge") +
+  #geom_errorbar(aes(ymin = Mean - SE, ymax = Mean + SE), width = 0.2, position = position_dodge(0.9)) +
+  #labs(x = "Trial type", y = "RT", fill = "Matching") +
+  #scale_fill_manual(values = c("darkblue", "cyan")) +
+  #theme_minimal()
+
+# plots for RT
+sum_switch_df %>%
+  ggplot() +
+  aes(x = trialtype, colour = matching, group = matching) +
+  geom_point(aes(y = Mean)) +
+  geom_line(aes(y = Mean)) +
+  geom_errorbar(aes(y = Mean, ymin = Mean - SE, ymax = Mean + SE), method = "lm", se = TRUE, width = 0.1) +
+  labs(x = "Switch", y = "RT", colour = "Matching") +
+  coord_cartesian(ylim = c(600, 1200))
+
+sum_noswitch_df %>%
+  ggplot() +
+  aes(x = trialtype, colour = matching, group = matching) +
+  geom_point(aes(y = Mean)) +
+  geom_line(aes(y = Mean)) +
+  geom_errorbar(aes(y = Mean, ymin = Mean - SE, ymax = Mean + SE), method = "lm", se = TRUE, width = 0.1) +
+  labs(x = "No Switch", y = "RT", colour = "Matching") +
+  coord_cartesian(ylim = c(600, 1200))
+
+
+# Create a summary dataframe for labeling
+labels_df <- sum_jaspdf2 %>%
+  group_by(trialtype, switching) %>%
+  plotly::summarise(Mean = mean(Mean), SE = mean(SE)) %>%
+  plyr::mutate(
+    lower_CI = Mean - 1.96 * SE,  # Calculate lower bound of 95% CI
+    upper_CI = Mean + 1.96 * SE,  # Calculate upper bound of 95% CI
+    label = paste("RT =", round(Mean, 3), "(", round(lower_CI, 3), "-", round(upper_CI, 3), ")")
+  )  # Create labels with mean and 95% CI
+
+# Plot with labels
+ggplot(sum_jaspdf2, aes(x = trialtype, colour = switching, group = switching)) +
+  geom_point(aes(y = Mean)) +
+  geom_line(aes(y = Mean)) +
+  geom_errorbar(aes(y = Mean, ymin = Mean - SE, ymax = Mean + SE), width = 0.1) +
+  geom_text(data = labels_df, aes(label = label, y = Mean), vjust = -1.5, size = 3.5, colour = "black") +  # Add labels
+  labs(x = "Trial Type", y = "RT", colour = "Switching") +
+  coord_cartesian(ylim = c(0.7, 1))
+
+
+
+
+sum_jaspdf1 %>%
+  ggplot() +
+  aes(x = trialtype, colour = matching, group = matching) +
+  geom_point(aes(y = Mean)) +
+  geom_line(aes(y = Mean)) +
+  geom_errorbar(aes(y = Mean, ymin = Mean - SE, ymax = Mean + SE), method = "lm", se = TRUE, width = 0.1) +
+  labs(x = "Trial Type", y = "RT", colour = "Matching") +
+  coord_cartesian(ylim = c(0.600, 1.200))
+
+# Define switch dataset and no switch dataset for PE visualisation
+sum_switch_pe <- switchdata %>%
+  group_by(trialtype, matching) %>%
+  plotly::summarise(
+    Mean = mean(error_proportion),
+    SE = sd(error_proportion) / sqrt(n())
+  )
+
+sum_noswitch_pe <- noswitchdata %>%
+  group_by(trialtype, matching) %>%
+  plotly::summarise(
+    Mean = mean(error_proportion),
+    SE = sd(error_proportion) / sqrt(n())
+  )
+
+sum_jasp_pe <- jaspdata %>%
+  group_by(trialtype, matching) %>%
+  plotly::summarise(
+    Mean = mean(error_proportion),
+    SE = sd(error_proportion) / sqrt(n())
+  )
+
+sum_switch_pe %>%
+  ggplot() +
+  aes(x = trialtype, colour = matching, group = matching) +
+  geom_point(aes(y = Mean)) +
+  geom_line(aes(y = Mean)) +
+  geom_errorbar(aes(y = Mean, ymin = Mean - SE, ymax = Mean + SE), method = "lm", se = TRUE, width = 0.1) +
+  labs(x = "Switch", y = "PE", colour = "Matching") +
+  coord_cartesian(ylim = c(0, 0.15))
+
+sum_noswitch_pe %>%
+  ggplot() +
+  aes(x = trialtype, colour = matching, group = matching) +
+  geom_point(aes(y = Mean)) +
+  geom_line(aes(y = Mean)) +
+  geom_errorbar(aes(y = Mean, ymin = Mean - SE, ymax = Mean + SE), method = "lm", se = TRUE, width = 0.1) +
+  labs(x = "No Switch", y = "PE", colour = "Matching") +
+  coord_cartesian(ylim = c(0, 0.15))
+
+sum_jasp_pe %>%
+  ggplot() +
+  aes(x = trialtype, colour = matching, group = matching) +
+  geom_point(aes(y = Mean)) +
+  geom_line(aes(y = Mean)) +
+  geom_errorbar(aes(y = Mean, ymin = Mean - SE, ymax = Mean + SE), method = "lm", se = TRUE, width = 0.1) +
+  labs(x = "Trial Type", y = "PE", colour = "Matching") +
+  coord_cartesian(ylim = c(0, 0.15))
+
+
+
+h1df <- data %>%
+  group_by(trialtype, matching) %>%
+  plotly::summarise(
+    Mean = mean(reactiontime),
+    SE = sd(reactiontime) / sqrt(n())
+  )
+
+h1df %>%
+  ggplot() +
+  aes(x = trialtype, colour = matching, group = matching) +
+  geom_point(aes(y = Mean)) +
+  geom_line(aes(y = Mean)) +
+  geom_errorbar(aes(y = Mean, ymin = Mean - SE, ymax = Mean + SE), method = "lm", se = TRUE, width = 0.1) +
+  labs(x = "Trial Type", y = "RT", colour = "Matching") +
+  coord_cartesian(ylim = c(600, 1200))
+
+```
+
+```{r}
+# filter data only for reference trials to enable analysis of gate opening
+refdf <- data |> dplyr::filter(!grepl("cmp", trialtype))
+#write.csv(refdf, "/Users/bella/Desktop/Psychologie/Bachelor/Erhebung/refdf.csv", row.names = FALSE)
+
+cmpdf <- data |> dplyr::filter(!grepl("ref", trialtype))
+# filter data only for comparison trials to enable analysis of gate closing
+#write.csv(cmpdf, "/Users/bella/Desktop/Psychologie/Bachelor/Erhebung/cmpdf.csv", row.names = FALSE)
+
+```
+
+```{r}
+# Read in temporal discounting (TD) data
+TDfile_path <- "/Users/bella/Desktop/Psychologie/Bachelor/Erhebung/dd_rawdata.txt"
+TDdata <- read.table(TDfile_path, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+TDsplit <- strsplit(as.character(TDdata$trial.ss_reward.ll_reward.delay.choice.rt.cond.sub_id.sess_id), " ")
+
+TDdf <- as.data.frame(do.call(rbind, TDsplit), stringsAsFactors = FALSE)
+
+colnames(TDdf) <- c("row", "trial", "ss_reward", "ll_reward", "delay", "choice", "rt", "cond", "ID", "sess_id")
+
+TDdf$trial <- as.integer(TDdf$trial)
+TDdf$ss_reward <- as.integer(TDdf$ss_reward)
+TDdf$ll_reward <- as.numeric(TDdf$ll_reward)
+TDdf$delay <- as.numeric(TDdf$delay)
+TDdf$choice <- as.integer(TDdf$choice)
+TDdf$rt <- as.numeric(TDdf$rt)
+TDdf$cond <- as.factor(TDdf$cond)
+TDdf$ID <- as.integer(TDdf$ID)
+TDdf$sess_id <- as.integer(TDdf$sess_id)
+
+TDdf <- TDdf %>%
+  dplyr::filter(ID != 99)
+
+summary(TDdf)
+
+```
+
+```{r}
+TDdf$choice <- as.numeric(TDdf$choice)
+
+# Calculate the mean choice proportion for each subject
+llproportions <- aggregate((1-choice) ~ ID, data = TDdf, FUN = mean, na.rm = TRUE)
+colnames(llproportions)[2] <- "ll_choice_prop"
+
+print(llproportions)
+print(meancosts)
+
+plot(llproportions)
+
+meancosts1 <- select(meancosts, ID, updating_cost, matching_cost, gate_opening_cost, gate_closing_cost, substitution)
+
+ggplot(llproportions, aes(x = meancosts1$updating_cost, y = ll_choice_prop)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(x = "LL choice", y = "Processes", title = "LL choice per updating cost")
+
+LL_cost_df <- cbind(meancosts1, llproportions)
+
+LL_cost_df <- LL_cost_df[, -7]
+
+LLcormatrix <- cor(LL_cost_df[, c("updating_cost", "matching_cost", "gate_opening_cost", "gate_closing_cost", "substitution", "ll_choice_prop")], use = "complete.obs", method = "pearson")
+colnames(LLcormatrix) <- c("Updating", "Matching", "Gate Opening", "Gate Closing", "Substitution", "LL choice proportion")
+rownames(LLcormatrix) <- c("Updating", "Matching", "Gate Opening", "Gate Closing", "Substitution", "LL choice proportion")
+print(LLcormatrix)
+LL_cor_df <- reshape2::melt(LLcormatrix)
+
+# Plot correlation heatmap with labels
+ggplot(LL_cor_df, aes(x = Var1, y = Var2, fill = value, label = round(value, 2))) +
+  geom_tile() +
+  geom_text(color = "black", size = 3) +  # Add text labels
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(x = "", y = "", title = "Correlation Heatmap of Processes") +
+  theme_minimal()
+
+LLreg <- lm(ll_choice_prop~ updating_cost + matching_cost + gate_opening_cost + gate_closing_cost + substitution, LL_cost_df)
+summary(LLreg)
+TukeyHSD(LLreg)
+
+```
+
